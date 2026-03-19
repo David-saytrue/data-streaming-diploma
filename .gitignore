@@ -1,0 +1,7 @@
+# Игнорируемые файлы
+.env
+data/
+logs/
+.DS_Store
+.idea/
+.vscode/
