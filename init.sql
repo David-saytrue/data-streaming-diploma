@@ -1,4 +1,4 @@
--- Создаем схему и таблицу заказов для нашего интернет-магазина
+-- Create schema and orders table for our e-commerce store
 CREATE SCHEMA shop;
 
 CREATE TABLE shop.orders (
@@ -9,8 +9,9 @@ CREATE TABLE shop.orders (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Важно дать права репликации пользователю, 
--- но так как у нас дефолтный postgres - он суперюзер. Просто вставляем данные.
+-- We need to grant replication privileges to the user, 
+-- but since we are using the default postgres user, it's already a superuser. 
+-- Just seeding some dummy data to start with.
 
 INSERT INTO shop.orders (customer_name, product_id, price) VALUES 
 ('Ivan Ivanov', 101, 550.00),
