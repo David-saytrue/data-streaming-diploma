@@ -4,11 +4,9 @@ A diploma project implementing a production-grade **real-time data streaming pip
 
 ## 🏗️ Architecture
 
+```text
+PostgreSQL → Debezium (CDC) → Apache Kafka → Apache Flink → Apache Iceberg (MinIO) → PrestoDB
 ```
-PostgreSQL → Debezium (CDC) → Apache Kafka → Apache Flink → Apache Iceberg → MinIO
-```
-
-![Architecture Diagram](./architecture.png)
 
 ### Components
 
@@ -21,6 +19,7 @@ PostgreSQL → Debezium (CDC) → Apache Kafka → Apache Flink → Apache Icebe
 | **Apache Flink** | 1.17.2 | Stream processing engine — SQL-based ETL |
 | **Apache Iceberg** | 1.4.3 | Open table format with ACID transactions |
 | **MinIO** | latest | S3-compatible object storage (Data Lake) |
+| **PrestoDB** | latest | Serving layer for interactive SQL analytics over the Data Lakehouse |
 
 ## 📊 Data Flow
 
@@ -29,19 +28,23 @@ PostgreSQL → Debezium (CDC) → Apache Kafka → Apache Flink → Apache Icebe
 3. **Apache Kafka** receives the CDC events as JSON messages in the `shop.shop.orders` topic
 4. **Apache Flink** consumes the Kafka stream using `debezium-json` format and writes the data to an Iceberg table via a streaming SQL job with 10-second checkpointing
 5. **Apache Iceberg** manages the table metadata (snapshots, manifests) and provides ACID transactions with upsert support (format-version 2)
-6. **MinIO** stores the Iceberg data files (`.parquet`) and metadata (`.avro`, `.json`) in the `lakehouse-admin` bucket
+6. **MinIO** stores the Iceberg data files (`.parquet`) and metadata (`.json`, `.avro`) in the `lakehouse-admin` bucket
+7. **PrestoDB** connects to MinIO using the Hadoop Iceberg Catalog to provide fast distributed SQL querying over the data lake files.
 
 ## 🗂️ Project Structure
 
-```
+```text
 data-streaming-diploma/
 ├── docker-compose.yml          # All services configuration
 ├── flink_job.sql               # Flink SQL streaming job
 ├── init.sql                    # PostgreSQL schema & seed data
 ├── register-connector.json     # Debezium connector config template
-└── flink/
-    ├── Dockerfile              # Custom Flink image with S3/Iceberg JARs
-    └── core-site.xml           # Hadoop S3A configuration for MinIO
+├── flink/
+│   ├── Dockerfile              # Custom Flink image with S3/Iceberg JARs
+│   └── core-site.xml           # Hadoop S3A configuration for Flink
+└── presto/
+    └── catalog/
+        └── iceberg.properties  # Presto Iceberg S3 catalog configuration
 ```
 
 ## ⚙️ How It Works
@@ -53,16 +56,6 @@ data-streaming-diploma/
 - Runs a continuous `INSERT INTO ... SELECT * FROM ...` streaming job
 - Checkpointing every **10 seconds** to commit Iceberg snapshots to MinIO
 
-### Data Lake Storage (MinIO)
-```
-lakehouse-admin/
-└── iceberg_data/
-    └── shop_analytics/
-        └── iceberg_orders/
-            ├── data/           ← Parquet data files
-            └── metadata/       ← Iceberg snapshots, manifests, metadata JSON
-```
-
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -70,47 +63,47 @@ lakehouse-admin/
 - Docker Compose
 
 ### 1. Start all services
-```bash
+```powershell
 docker-compose up -d
 ```
 
-### 2. Wait for services to be ready (~30 seconds), then register the Debezium connector
+### 2. Register the Debezium connector
+Wait for 30-40 seconds for all services (especially MinIO and Kafka) to fully start, then run:
+
+*For PowerShell:*
+```powershell
+$json = Get-Content register-connector.json -Raw
+Invoke-RestMethod -Uri "http://localhost:8083/connectors" -Method Post -Body $json -ContentType "application/json"
+```
+
+*For Bash/Linux:*
 ```bash
-curl -X POST http://localhost:8083/connectors \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "shop-connector",
-    "config": {
-      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-      "topic.prefix": "shop",
-      "database.hostname": "postgres",
-      "database.port": "5432",
-      "database.user": "postgres",
-      "database.password": "postgres",
-      "database.dbname": "shop_db",
-      "table.include.list": "shop.orders",
-      "plugin.name": "pgoutput",
-      "decimal.handling.mode": "double"
-    }
-  }'
+curl -X POST http://localhost:8083/connectors -H "Content-Type: application/json" -d @register-connector.json
 ```
 
 ### 3. Start the Flink streaming job
-```bash
-docker exec -it data-streaming-diploma-jobmanager-1 \
-  /opt/flink/bin/sql-client.sh -f /opt/flink/flink_job.sql
+Submit the continuous ETL streaming job to Flink:
+```powershell
+docker exec -it data-streaming-diploma-jobmanager-1 /opt/flink/bin/sql-client.sh -f /opt/flink/flink_job.sql
 ```
 
-### 4. Insert test data
-```bash
-docker exec -it data-streaming-diploma-postgres-1 \
-  psql -U postgres -d shop_db \
-  -c "INSERT INTO shop.orders (customer_name, product_id, price) VALUES ('Test User', 1, 99.99);"
+### 4. Insert test data & Verify CDC
+Test the Change Data Capture flow by making a change in PostgreSQL:
+```powershell
+docker exec -it data-streaming-diploma-postgres-1 psql -U postgres -d shop_db -c "INSERT INTO shop.orders (customer_name, product_id, price) VALUES ('Alex Tesla', 555, 77700.00);"
 ```
+*(Wait 10 seconds for the Flink checkpoint to commit the changes to MinIO)*
 
-### 5. Verify data in MinIO
-Open MinIO Console at **http://localhost:9001** (admin / adminpassword)  
-Navigate to: `lakehouse-admin → iceberg_data → shop_analytics → iceberg_orders → data/`
+### 5. Query the Data Lake using PrestoDB 
+Hop into the interactive Presto query console to analyze your Iceberg tables:
+```powershell
+docker exec -it data-streaming-diploma-presto-1 /opt/presto-cli
+```
+Execute your query:
+```sql
+USE iceberg.shop_analytics;
+SELECT * FROM iceberg_orders;
+```
 
 ## 🌐 Service URLs
 
@@ -119,45 +112,14 @@ Navigate to: `lakehouse-admin → iceberg_data → shop_analytics → iceberg_or
 | **Flink Dashboard** | http://localhost:8081 | — |
 | **MinIO Console** | http://localhost:9001 | admin / adminpassword |
 | **Kafka Connect (Debezium)** | http://localhost:8083 | — |
-| **PostgreSQL** | localhost:5432 | postgres / postgres |
+| **PrestoDB Console** | http://localhost:8080 | — |
 
-## 🔍 Monitoring
-
-### Check Flink job status
-```bash
-curl http://localhost:8081/jobs
-```
-
-### Check Debezium connector status
-```bash
-curl http://localhost:8083/connectors/shop-connector/status
-```
-
-### Check Kafka topic messages
-```bash
-docker exec data-streaming-diploma-kafka-1 \
-  /kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server kafka:9092 \
-  --topic shop.shop.orders \
-  --from-beginning --max-messages 5
-```
-
-## 🏛️ Lakehouse Architecture
+## 🏛️ Lakehouse Architecture Highlights
 
 This project implements the **Lakehouse pattern** — combining the scalability and cost-efficiency of a Data Lake with the ACID transactions and schema enforcement of a Data Warehouse.
 
-Key Iceberg features used:
+Key features successfully demonstrated in this diploma:
 - ✅ **Format version 2** — enables row-level deletes and upserts
 - ✅ **UPSERT mode** — handles CDC UPDATE/DELETE operations correctly
 - ✅ **Snapshot isolation** — every Flink checkpoint creates an atomic Iceberg snapshot
-- ✅ **Time travel** — Iceberg metadata tracks all historical snapshots (v1, v2, v3...)
-- ✅ **Open format** — Parquet data files can be read by Spark, Trino, DuckDB
-
-## 📚 Technologies
-
-- **Apache Flink 1.17.2** — stateful stream processing with exactly-once semantics
-- **Apache Iceberg 1.4.3** — open table format (used by Netflix, Apple, LinkedIn)
-- **Apache Kafka** — distributed event streaming
-- **Debezium 2.4** — industry-standard CDC framework
-- **MinIO** — high-performance S3-compatible object storage
-- **PostgreSQL 14** — source transactional database
+- ✅ **Interoperability** — Flink processes the real-time streams, while Presto simultaneously queries the exact same Parquet data files using open table formats.

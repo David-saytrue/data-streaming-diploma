@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS kafka_orders (
     id INT,
     customer_name STRING,
     product_id INT,
-    price DOUBLE,
+    price DECIMAL(10, 2),
     created_at BIGINT,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS iceberg_catalog.shop_analytics.iceberg_orders (
     id INT,
     customer_name STRING,
     product_id INT,
-    price DOUBLE,
+    price DECIMAL(10, 2),
     created_at BIGINT,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (

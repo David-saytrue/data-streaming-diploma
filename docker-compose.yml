@@ -114,3 +114,15 @@ services:
         s3.access-key: admin
         s3.secret-key: adminpassword
         s3.path.style.access: true
+
+  # =========================================================
+  # PrestoDB (Serving & SQL Analytics for Hadoop Catalog)
+  # =========================================================
+  presto:
+    image: prestodb/presto:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./presto/catalog:/opt/presto-server/etc/catalog
+    depends_on:
+      - minio
