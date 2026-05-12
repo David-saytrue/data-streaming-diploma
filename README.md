@@ -1,60 +1,126 @@
-# 🚀 Real-Time Data Streaming Pipeline
+# 🚀 Real-Time CDC + Lakehouse Pipeline (AdventureWorks → Star Schema)
 
-A diploma project implementing a production-grade **real-time data streaming pipeline** using modern open-source Data Engineering tools. The system captures database changes in real-time and stores them in a Data Lake using the **Lakehouse architecture**.
+A diploma project implementing a production-grade **real-time CDC pipeline**
+on top of a **Lakehouse** built from open-source components. Operational
+changes in a PostgreSQL **AdventureWorks** database are captured as events,
+processed by Apache Flink, and materialised into a **dimensional star
+schema** stored as Apache Iceberg tables on MinIO. Analysts query the
+result through PrestoDB.
 
 ## 🏗️ Architecture
 
 ```text
-PostgreSQL → Debezium (CDC) → Apache Kafka → Apache Flink → Apache Iceberg (MinIO) → PrestoDB
+AdventureWorks (PostgreSQL)
+        │  WAL (logical decoding)
+        ▼
+   Debezium (Kafka Connect)
+        │  CDC events as JSON
+        ▼
+      Apache Kafka
+        │
+        ▼
+   Apache Flink (SQL)
+   ├── Bronze: raw CDC mirrors (1:1 with source)
+   └── Gold:   star schema (facts + dimensions)
+        │
+        ▼
+   Apache Iceberg @ MinIO   ← Lakehouse storage
+        │
+        ▼
+       PrestoDB              ← BI / SQL analytics
 ```
 
 ### Components
 
 | Component | Version | Role |
 |-----------|---------|------|
-| **PostgreSQL** | 14 | Source operational database (`shop.orders` table) |
-| **Debezium** | 2.4 | Change Data Capture (CDC) — reads PostgreSQL WAL log |
-| **Apache Kafka** | (Debezium 2.4) | Message broker — topic `shop.shop.orders` |
-| **Apache ZooKeeper** | (Debezium 2.4) | Kafka coordination service |
-| **Apache Flink** | 1.17.2 | Stream processing engine — SQL-based ETL |
-| **Apache Iceberg** | 1.4.3 | Open table format with ACID transactions |
-| **MinIO** | latest | S3-compatible object storage (Data Lake) |
-| **PrestoDB** | latest | Serving layer for interactive SQL analytics over the Data Lakehouse |
+| **PostgreSQL** | 15 | OLTP source — AdventureWorks subset (Sales / Production / Person) |
+| **Debezium** | 2.4 | CDC connector reading the PostgreSQL WAL |
+| **Apache Kafka** | (Debezium 2.4) | Event log — one topic per source table |
+| **Apache Flink** | 1.17.2 | Streaming SQL engine (Bronze + Gold pipelines) |
+| **Apache Iceberg** | 1.4.3 | Open table format with ACID and time travel |
+| **MinIO** | latest | S3-compatible object storage for the lakehouse |
+| **PrestoDB** | latest | Distributed SQL engine over the lakehouse |
 
 ## 📊 Data Flow
 
-1. **PostgreSQL** stores e-commerce orders in the `shop.orders` table
-2. **Debezium** monitors the PostgreSQL WAL (Write-Ahead Log) and captures every INSERT, UPDATE, DELETE as a CDC event
-3. **Apache Kafka** receives the CDC events as JSON messages in the `shop.shop.orders` topic
-4. **Apache Flink** consumes the Kafka stream using `debezium-json` format and writes the data to an Iceberg table via a streaming SQL job with 10-second checkpointing
-5. **Apache Iceberg** manages the table metadata (snapshots, manifests) and provides ACID transactions with upsert support (format-version 2)
-6. **MinIO** stores the Iceberg data files (`.parquet`) and metadata (`.json`, `.avro`) in the `lakehouse-admin` bucket
-7. **PrestoDB** connects to MinIO using the Hadoop Iceberg Catalog to provide fast distributed SQL querying over the data lake files.
+1. **PostgreSQL** stores a slimmed-down **AdventureWorks** model:
+   `person`, `production`, `sales` schemas (~10 tables).
+2. **Debezium** monitors the WAL via `pgoutput` and emits a CDC event
+   stream per table to Kafka topics `aw.<schema>.<table>`.
+3. **Apache Flink** consumes the streams in `debezium-json` format and
+   runs a single multi-statement SQL job that maintains:
+   - **Bronze** — exact mirrors of every source table in
+     `iceberg.bronze.br_*` (audit + time travel substrate).
+   - **Gold** — a dimensional **star schema** in `iceberg.gold.*`,
+     built by streaming joins on primary keys.
+4. **Apache Iceberg** manages snapshots, schema evolution and ACID
+   commits; every Flink checkpoint produces a new snapshot.
+5. **MinIO** stores the Parquet data files and Iceberg metadata.
+6. **PrestoDB** reads the same files via the Hadoop Iceberg catalog.
+
+## ⭐ Star Schema (Gold layer)
+
+Single fact at the **order-line** grain, surrounded by conformed
+dimensions:
+
+```text
+                          ┌──────────────────┐
+                          │   dim_date       │
+                          └────────┬─────────┘
+                                   │
+   ┌────────────┐   ┌──────────────┴─────────────┐   ┌────────────────┐
+   │ dim_product├──►│  fact_sales_order_line     │◄──┤ dim_customer   │
+   └────────────┘   │                            │   └────────────────┘
+                    │   sales_order_id           │
+   ┌────────────┐   │   sales_order_detail_id    │   ┌────────────────┐
+   │dim_territory├─►│   order_qty / unit_price   │◄──┤ dim_salesperson│
+   └────────────┘   │   line_total / discount    │   └────────────────┘
+                    └──────────────┬─────────────┘
+                                   │
+                          ┌────────┴─────────┐
+                          │  dim_currency    │
+                          └──────────────────┘
+```
+
+| Layer | Iceberg location | What it is |
+|-------|------------------|------------|
+| Bronze | `iceberg.bronze.br_*`           | Raw CDC mirrors, one per source table |
+| Gold   | `iceberg.gold.fact_sales_order_line` | The single business fact |
+| Gold   | `iceberg.gold.dim_customer`     | customer ⨝ person ⨝ territory |
+| Gold   | `iceberg.gold.dim_product`      | product ⨝ subcategory ⨝ category |
+| Gold   | `iceberg.gold.dim_territory`    | sales territory |
+| Gold   | `iceberg.gold.dim_salesperson`  | salesperson ⨝ person ⨝ territory |
+| Gold   | `iceberg.gold.dim_currency`     | currency reference |
+| Gold   | `iceberg.gold.dim_date`         | generated date dimension (one-shot in Presto) |
 
 ## 🗂️ Project Structure
 
 ```text
 data-streaming-diploma/
-├── docker-compose.yml          # All services configuration
-├── flink_job.sql               # Flink SQL streaming job
-├── init.sql                    # PostgreSQL schema & seed data
-├── register-connector.json     # Debezium connector config template
+├── docker-compose.yml             # All services configuration
+├── flink_job.sql                  # Multi-statement Flink SQL pipeline
+├── init.sql                       # AdventureWorks PostgreSQL subset
+├── register-connector.json        # Debezium multi-table connector
 ├── flink/
-│   ├── Dockerfile              # Custom Flink image with S3/Iceberg JARs
-│   └── core-site.xml           # Hadoop S3A configuration for Flink
-└── presto/
-    └── catalog/
-        └── iceberg.properties  # Presto Iceberg S3 catalog configuration
+│   ├── Dockerfile                 # Custom Flink image with S3/Iceberg JARs
+│   └── core-site.xml              # Hadoop S3A configuration for Flink
+├── presto/
+│   └── catalog/
+│       └── iceberg.properties     # Presto Iceberg/S3 catalog
+└── sql/
+    ├── dim_date.sql               # One-shot date-dimension generator
+    └── metrics/                   # Analytical queries (BI / KPI pack)
+        ├── 01_revenue_by_day.sql
+        ├── 02_revenue_by_month.sql
+        ├── 03_top_products.sql
+        ├── 04_aov_and_basket.sql
+        ├── 05_sales_by_territory.sql
+        ├── 06_discount_impact.sql
+        ├── 07_salesperson_performance.sql
+        ├── 08_time_travel_demo.sql
+        └── README.md
 ```
-
-## ⚙️ How It Works
-
-### Flink SQL Job (`flink_job.sql`)
-- Creates an **Iceberg catalog** backed by MinIO (S3A protocol)
-- Defines a **Kafka source table** (`kafka_orders`) in the default catalog using `debezium-json` format
-- Defines an **Iceberg sink table** (`iceberg_orders`) with upsert mode enabled
-- Runs a continuous `INSERT INTO ... SELECT * FROM ...` streaming job
-- Checkpointing every **10 seconds** to commit Iceberg snapshots to MinIO
 
 ## 🚀 Quick Start
 
@@ -68,41 +134,70 @@ docker-compose up -d
 ```
 
 ### 2. Register the Debezium connector
-Wait for 30-40 seconds for all services (especially MinIO and Kafka) to fully start, then run:
+Wait 30–40 seconds for MinIO and Kafka to come up, then:
 
-*For PowerShell:*
 ```powershell
 $json = Get-Content register-connector.json -Raw
 Invoke-RestMethod -Uri "http://localhost:8083/connectors" -Method Post -Body $json -ContentType "application/json"
 ```
 
-*For Bash/Linux:*
+Bash equivalent:
+
 ```bash
-curl -X POST http://localhost:8083/connectors -H "Content-Type: application/json" -d @register-connector.json
+curl -X POST http://localhost:8083/connectors \
+     -H "Content-Type: application/json" \
+     -d @register-connector.json
 ```
 
-### 3. Start the Flink streaming job
-Submit the continuous ETL streaming job to Flink:
+### 3. Submit the Flink streaming pipeline
+The full Bronze + Gold pipeline is shipped as a single SQL file:
+
 ```powershell
-docker exec -it data-streaming-diploma-jobmanager-1 /opt/flink/bin/sql-client.sh -f /opt/flink/flink_job.sql
+docker exec -it data-streaming-diploma-jobmanager-1 `
+    /opt/flink/bin/sql-client.sh -f /opt/flink/flink_job.sql
 ```
 
-### 4. Insert test data & Verify CDC
-Test the Change Data Capture flow by making a change in PostgreSQL:
+A single Flink job named `adventureworks-cdc-lakehouse` should appear in
+the dashboard at http://localhost:8081.
+
+### 4. Generate `dim_date` (one-off)
 ```powershell
-docker exec -it data-streaming-diploma-postgres-1 psql -U postgres -d shop_db -c "INSERT INTO shop.orders (customer_name, product_id, price) VALUES ('Alex Tesla', 555, 77700.00);"
+docker exec -i data-streaming-diploma-presto-1 `
+    /opt/presto-cli --catalog iceberg --schema gold `
+    -f /opt/presto-server/etc/sql/dim_date.sql
 ```
-*(Wait 10 seconds for the Flink checkpoint to commit the changes to MinIO)*
 
-### 5. Query the Data Lake using PrestoDB 
-Hop into the interactive Presto query console to analyze your Iceberg tables:
+### 5. Test the CDC flow
+Insert a new order in PostgreSQL and watch it propagate:
+
+```powershell
+docker exec -it data-streaming-diploma-postgres-1 `
+    psql -U postgres -d adventureworks -c `
+    "INSERT INTO sales.sales_order_header
+        (customer_id, sales_person_id, territory_id, currency_code,
+         sub_total, tax_amt, freight, total_due)
+     VALUES (1, 1, 1, 'GEL', 79.99, 7.99, 5.00, 92.98);"
+```
+
+Wait ~10 s for a Flink checkpoint, then query the lakehouse:
+
+### 6. Query the lakehouse with PrestoDB
 ```powershell
 docker exec -it data-streaming-diploma-presto-1 /opt/presto-cli
 ```
-Execute your query:
 ```sql
-USE iceberg.shop_analytics;
-SELECT * FROM iceberg_orders;
+USE iceberg.gold;
+SELECT * FROM fact_sales_order_line ORDER BY order_ts DESC LIMIT 10;
+SELECT * FROM dim_customer;
+```
+
+### 7. Run the analytics pack
+Every file in `sql/metrics/` is a self-contained Presto query.
+For example, top products by revenue:
+
+```powershell
+Get-Content sql/metrics/03_top_products.sql | `
+    docker exec -i data-streaming-diploma-presto-1 /opt/presto-cli
 ```
 
 ## 🌐 Service URLs
@@ -110,16 +205,19 @@ SELECT * FROM iceberg_orders;
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | **Flink Dashboard** | http://localhost:8081 | — |
-| **MinIO Console** | http://localhost:9001 | admin / adminpassword |
-| **Kafka Connect (Debezium)** | http://localhost:8083 | — |
-| **PrestoDB Console** | http://localhost:8080 | — |
+| **MinIO Console**   | http://localhost:9001 | admin / adminpassword |
+| **Kafka Connect**   | http://localhost:8083 | — |
+| **PrestoDB**        | http://localhost:8080 | — |
 
-## 🏛️ Lakehouse Architecture Highlights
+## 🏛️ Lakehouse highlights demonstrated
 
-This project implements the **Lakehouse pattern** — combining the scalability and cost-efficiency of a Data Lake with the ACID transactions and schema enforcement of a Data Warehouse.
-
-Key features successfully demonstrated in this diploma:
-- ✅ **Format version 2** — enables row-level deletes and upserts
-- ✅ **UPSERT mode** — handles CDC UPDATE/DELETE operations correctly
-- ✅ **Snapshot isolation** — every Flink checkpoint creates an atomic Iceberg snapshot
-- ✅ **Interoperability** — Flink processes the real-time streams, while Presto simultaneously queries the exact same Parquet data files using open table formats.
+- ✅ **Medallion architecture** — Bronze (raw CDC) + Gold (star schema)
+- ✅ **Streaming dimensional modelling** — fact and dims maintained
+  with Flink SQL streaming joins on primary keys
+- ✅ **Iceberg format-version 2** — row-level deletes & upserts
+- ✅ **Snapshot isolation** — every Flink checkpoint commits an
+  atomic Iceberg snapshot
+- ✅ **Time travel** — query the star schema *as of* any past
+  snapshot without restoring a backup (see `sql/metrics/08_time_travel_demo.sql`)
+- ✅ **Open interoperability** — Flink writes, Presto reads, both
+  against the same Parquet files via the open Iceberg spec
