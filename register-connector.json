@@ -1,16 +1,29 @@
 {
-  "name": "shop-connector",
+  "name": "adventureworks-connector",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
+
     "database.hostname": "postgres",
     "database.port": "5432",
     "database.user": "postgres",
     "database.password": "postgres",
-    "database.dbname": "shop_db",
-    "database.server.name": "shop_server",
-    "table.include.list": "shop.orders",
+    "database.dbname": "adventureworks",
+    "database.server.name": "adventureworks_server",
+
     "plugin.name": "pgoutput",
-    "topic.prefix": "shop"
+    "slot.name": "aw_slot",
+    "publication.name": "aw_publication",
+    "publication.autocreate.mode": "filtered",
+
+    "schema.include.list": "person,production,sales",
+    "table.include.list": "person.person,production.product_category,production.product_subcategory,production.product,sales.sales_territory,sales.currency,sales.customer,sales.sales_person,sales.sales_order_header,sales.sales_order_detail",
+
+    "topic.prefix": "aw",
+
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "false",
+    "decimal.handling.mode": "string",
+    "heartbeat.interval.ms": "10000"
   }
 }
