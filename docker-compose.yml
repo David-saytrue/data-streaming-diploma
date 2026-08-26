@@ -132,3 +132,71 @@ services:
       - ./sql:/opt/presto-server/etc/sql
     depends_on:
       - minio
+
+  # =========================================================
+  # Apache Airflow (batch orchestration — K-Means on MinIO)
+  # =========================================================
+  airflow-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow:
+    image: apache/airflow:2.8.1-python3.11
+    restart: always
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    ports:
+      - "8085:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+      AIRFLOW__CORE__FERNET_KEY: "PzT65e2A0sgnL-poiTk1G-WpgB0Sv0ByDpIlBS2mB9k="
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      _PIP_ADDITIONAL_REQUIREMENTS: "pandas pyarrow scikit-learn boto3 s3fs"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: admin
+      MINIO_SECRET_KEY: adminpassword
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./analytics:/opt/airflow/analytics
+      - airflow-logs:/opt/airflow/logs
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+      exec airflow standalone
+      "
+
+  # =========================================================
+  # Metabase (BI dashboard over Presto / Iceberg Gold)
+  # =========================================================
+  metabase:
+    image: metabase/metabase:v0.49.13
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+      JAVA_TIMEZONE: Asia/Tbilisi
+    volumes:
+      - metabase-data:/metabase-data
+    depends_on:
+      - presto
+
+volumes:
+  airflow-db-data:
+  airflow-logs:
+  metabase-data:

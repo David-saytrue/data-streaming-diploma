@@ -1,13 +1,29 @@
-# 🚀 Real-Time CDC + Lakehouse Pipeline (AdventureWorks → Star Schema)
+# Real-Time CDC + Lakehouse Platform
 
-A diploma project implementing a production-grade **real-time CDC pipeline**
-on top of a **Lakehouse** built from open-source components. Operational
-changes in a PostgreSQL **AdventureWorks** database are captured as events,
-processed by Apache Flink, and materialised into a **dimensional star
-schema** stored as Apache Iceberg tables on MinIO. Analysts query the
-result through PrestoDB.
+> Bachelor's diploma project — end-to-end **Data Engineering** platform:  
+> **CDC streaming → Iceberg Lakehouse → SQL/BI → batch ML**
 
-## 🏗️ Architecture
+Operational changes in PostgreSQL (**AdventureWorks**) are captured with
+**Debezium**, streamed through **Kafka**, processed by **Apache Flink**,
+and stored as **Iceberg** tables on **MinIO**. Analysts query Gold data with
+**Presto** / **Metabase**. **Airflow** runs Python **K-Means** customer
+segmentation on Gold Parquet.
+
+**Author:** [Davit](https://github.com/David-saytrue) · Tbilisi, Georgia
+
+### Highlights for recruiters
+
+| Result | Detail |
+|--------|--------|
+| End-to-end stack | Postgres → Debezium → Kafka → Flink → Iceberg/MinIO → Presto/Metabase |
+| Architecture | Medallion (Bronze + Gold) + star schema |
+| Measured latency | **~10–14 s** from INSERT to Gold visibility |
+| Batch layer | Airflow + scikit-learn K-Means on MinIO |
+| Runnable demo | Docker Compose + PowerShell scripts |
+
+![Architecture](docs/architecture-corrected.png)
+
+## Architecture
 
 ```text
 AdventureWorks (PostgreSQL)
@@ -16,7 +32,7 @@ AdventureWorks (PostgreSQL)
    Debezium (Kafka Connect)
         │  CDC events as JSON
         ▼
-      Apache Kafka
+      Apache Kafka (+ Zookeeper)
         │
         ▼
    Apache Flink (SQL)
@@ -26,21 +42,28 @@ AdventureWorks (PostgreSQL)
         ▼
    Apache Iceberg @ MinIO   ← Lakehouse storage
         │
-        ▼
-       PrestoDB              ← BI / SQL analytics
+        ├──► PrestoDB / Metabase   ← SQL + BI
+        └──► Airflow → Python K-Means  ← batch ML
 ```
+
+**Infrastructure note:** Kafka in this stack uses **Zookeeper** for
+broker coordination (Debezium Kafka image). **MinIO** is the S3-compatible
+lakehouse storage (Iceberg Parquet + analytics output).
 
 ### Components
 
-| Component | Version | Role |
-|-----------|---------|------|
-| **PostgreSQL** | 15 | OLTP source — AdventureWorks subset (Sales / Production / Person) |
-| **Debezium** | 2.4 | CDC connector reading the PostgreSQL WAL |
-| **Apache Kafka** | (Debezium 2.4) | Event log — one topic per source table |
-| **Apache Flink** | 1.17.2 | Streaming SQL engine (Bronze + Gold pipelines) |
-| **Apache Iceberg** | 1.4.3 | Open table format with ACID and time travel |
-| **MinIO** | latest | S3-compatible object storage for the lakehouse |
-| **PrestoDB** | latest | Distributed SQL engine over the lakehouse |
+| Component          | Version        | Role                                                              |
+| ------------------ | -------------- | ----------------------------------------------------------------- |
+| **PostgreSQL**     | 15             | OLTP source — AdventureWorks subset (Sales / Production / Person) |
+| **Debezium**       | 2.4            | CDC connector reading the PostgreSQL WAL                          |
+| **Apache Kafka**   | (Debezium 2.4) | Event log — one topic per source table                            |
+| **Apache Flink**   | 1.17.2         | Streaming SQL engine (Bronze + Gold pipelines)                    |
+| **Apache Iceberg** | 1.4.3          | Open table format with ACID and time travel                       |
+| **MinIO**          | latest         | S3-compatible object storage for the lakehouse                    |
+| **PrestoDB**       | latest         | Distributed SQL engine over the lakehouse                         |
+| **Metabase**       | 0.49           | BI dashboard on Presto / Iceberg Gold                             |
+| **Airflow**        | 2.8            | Batch orchestration for K-Means                                   |
+| **Python / sklearn** | —            | Customer clustering on Gold Parquet                               |
 
 ## 📊 Data Flow
 
@@ -83,16 +106,16 @@ dimensions:
                           └──────────────────┘
 ```
 
-| Layer | Iceberg location | What it is |
-|-------|------------------|------------|
-| Bronze | `iceberg.bronze.br_*`           | Raw CDC mirrors, one per source table |
-| Gold   | `iceberg.gold.fact_sales_order_line` | The single business fact |
-| Gold   | `iceberg.gold.dim_customer`     | customer ⨝ person ⨝ territory |
-| Gold   | `iceberg.gold.dim_product`      | product ⨝ subcategory ⨝ category |
-| Gold   | `iceberg.gold.dim_territory`    | sales territory |
-| Gold   | `iceberg.gold.dim_salesperson`  | salesperson ⨝ person ⨝ territory |
-| Gold   | `iceberg.gold.dim_currency`     | currency reference |
-| Gold   | `iceberg.gold.dim_date`         | generated date dimension (one-shot in Presto) |
+| Layer  | Iceberg location                     | What it is                                    |
+| ------ | ------------------------------------ | --------------------------------------------- |
+| Bronze | `iceberg.bronze.br_*`                | Raw CDC mirrors, one per source table         |
+| Gold   | `iceberg.gold.fact_sales_order_line` | The single business fact                      |
+| Gold   | `iceberg.gold.dim_customer`          | customer ⨝ person ⨝ territory                 |
+| Gold   | `iceberg.gold.dim_product`           | product ⨝ subcategory ⨝ category              |
+| Gold   | `iceberg.gold.dim_territory`         | sales territory                               |
+| Gold   | `iceberg.gold.dim_salesperson`       | salesperson ⨝ person ⨝ territory              |
+| Gold   | `iceberg.gold.dim_currency`          | currency reference                            |
+| Gold   | `iceberg.gold.dim_date`              | generated date dimension (one-shot in Presto) |
 
 ## 🗂️ Project Structure
 
@@ -125,15 +148,18 @@ data-streaming-diploma/
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - Docker Desktop
 - Docker Compose
 
 ### 1. Start all services
+
 ```powershell
 docker-compose up -d
 ```
 
 ### 2. Register the Debezium connector
+
 Wait 30–40 seconds for MinIO and Kafka to come up, then:
 
 ```powershell
@@ -150,6 +176,7 @@ curl -X POST http://localhost:8083/connectors \
 ```
 
 ### 3. Submit the Flink streaming pipeline
+
 The full Bronze + Gold pipeline is shipped as a single SQL file:
 
 ```powershell
@@ -161,6 +188,7 @@ A single Flink job named `adventureworks-cdc-lakehouse` should appear in
 the dashboard at http://localhost:8081.
 
 ### 4. Generate `dim_date` (one-off)
+
 ```powershell
 docker exec -i data-streaming-diploma-presto-1 `
     /opt/presto-cli --catalog iceberg --schema gold `
@@ -168,6 +196,7 @@ docker exec -i data-streaming-diploma-presto-1 `
 ```
 
 ### 5. Test the CDC flow
+
 Insert a new order in PostgreSQL and watch it propagate:
 
 ```powershell
@@ -182,9 +211,11 @@ docker exec -it data-streaming-diploma-postgres-1 `
 Wait ~10 s for a Flink checkpoint, then query the lakehouse:
 
 ### 6. Query the lakehouse with PrestoDB
+
 ```powershell
 docker exec -it data-streaming-diploma-presto-1 /opt/presto-cli
 ```
+
 ```sql
 USE iceberg.gold;
 SELECT * FROM fact_sales_order_line ORDER BY order_ts DESC LIMIT 10;
@@ -192,6 +223,7 @@ SELECT * FROM dim_customer;
 ```
 
 ### 7. Run the analytics pack
+
 Every file in `sql/metrics/` is a self-contained Presto query.
 For example, top products by revenue:
 
@@ -200,14 +232,60 @@ Get-Content sql/metrics/03_top_products.sql | `
     docker exec -i data-streaming-diploma-presto-1 /opt/presto-cli
 ```
 
+### 8. K-Means clustering (Airflow + Python @ MinIO)
+
+After the Gold layer has data (step 5–6 above), run customer
+segmentation with scikit-learn on Parquet files stored in MinIO.
+
+**Direct (terminal):**
+
+```powershell
+docker exec data-streaming-diploma-airflow-1 `
+    python /opt/airflow/analytics/kmeans_customers.py
+```
+
+**Via Airflow UI:**
+
+1. Open http://localhost:8085 (admin / admin)
+2. Enable DAG `lakehouse_customer_kmeans`
+3. Trigger DAG — task runs `analytics/kmeans_customers.py`
+4. Results: MinIO bucket `lakehouse-admin` → `analytics/customer_clusters/`
+
+See [docs/ARCHITECTURE_KA.md](docs/ARCHITECTURE_KA.md) for why
+**Zookeeper**, **MinIO**, **Airflow**, and **K-Means** are in the stack.
+
+### 9. CDC latency experiment + BI dashboard
+
+`demo-pipeline.ps1` already inserts a test order and shows CDC end-to-end.
+For a **measured experiment** (latency in seconds + KPI report for the thesis):
+
+```powershell
+.\scripts\run-experiment.ps1
+```
+
+Report: `docs/experiment-results/latest.md`  
+Guide: [docs/EXPERIMENT_KA.md](docs/EXPERIMENT_KA.md)
+
+**Metabase BI** (visual dashboard on Presto Gold):
+
+```powershell
+docker compose up -d metabase
+.\scripts\setup-metabase.ps1
+```
+
+Open http://localhost:3000 — connection steps and SQL cards:
+[docs/BI_DASHBOARD_KA.md](docs/BI_DASHBOARD_KA.md)
+
 ## 🌐 Service URLs
 
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| **Flink Dashboard** | http://localhost:8081 | — |
+| Service             | URL                   | Credentials           |
+| ------------------- | --------------------- | --------------------- |
+| **Flink Dashboard** | http://localhost:8081 | —                     |
 | **MinIO Console**   | http://localhost:9001 | admin / adminpassword |
-| **Kafka Connect**   | http://localhost:8083 | — |
-| **PrestoDB**        | http://localhost:8080 | — |
+| **Kafka Connect**   | http://localhost:8083 | —                     |
+| **PrestoDB**        | http://localhost:8080 | —                     |
+| **Airflow**         | http://localhost:8085 | admin / admin         |
+| **Metabase (BI)**   | http://localhost:3000 | admin@adventureworks.local / Admin123! |
 
 ## 🏛️ Lakehouse highlights demonstrated
 
@@ -217,7 +295,12 @@ Get-Content sql/metrics/03_top_products.sql | `
 - ✅ **Iceberg format-version 2** — row-level deletes & upserts
 - ✅ **Snapshot isolation** — every Flink checkpoint commits an
   atomic Iceberg snapshot
-- ✅ **Time travel** — query the star schema *as of* any past
+- ✅ **Time travel** — query the star schema _as of_ any past
   snapshot without restoring a backup (see `sql/metrics/08_time_travel_demo.sql`)
 - ✅ **Open interoperability** — Flink writes, Presto reads, both
   against the same Parquet files via the open Iceberg spec
+- ✅ **Batch ML layer** — Airflow orchestrates Python K-Means on
+  Gold Parquet in MinIO (customer segmentation)
+- ✅ **BI dashboard** — Metabase over Presto / Iceberg Gold
+- ✅ **Measured CDC experiment** — `scripts/run-experiment.ps1`
+  records INSERT→Gold latency + KPI report
